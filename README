@@ -1,0 +1,22 @@
+QoS - Quality of Service
+
+WHY
+=====
+
+1. frontend rate limit, prevent resource being exhausted
+2. traffic shaping, cut the spikes
+3. backend rate limit, do not put too much pressure on the upstream (such as 3rd party api)
+4. resource utilization, when not busy, allocate as many as we can
+5. fair scheduling, one user should not block other users from basic service
+6. business priority, high priority business can be handled first
+
+
+FUTURE
+========
+1. access logging
+2. performance logging
+3. control panel to adjust priority
+4. dashboard to see healthiness
+5. performance stats based scheduling
+6. access control
+
