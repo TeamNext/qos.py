@@ -21,8 +21,8 @@ HTTP_STATUS_TOO_MANY_REQUESTS = 429
 
 
 def main(*argv):
-    logging.basicConfig(level=logging.INFO)
     signal.signal(signal.SIGINT, lambda signum, fame: queue.shutdown())
+    signal.signal(signal.SIGHUP, lambda signum, fame: reload_settings())
     for frontend_name, frontend_config in settings.FRONTENDS.items():
         gevent.spawn(start_frontend, frontend_name, frontend_config)
     queue.serve_forever(
@@ -30,6 +30,11 @@ def main(*argv):
         check_quota=check_quota,
         handle_ready_job=handle_ready_job)
     gevent.sleep(5)
+
+
+def reload_settings():
+    LOGGER.info('reload settings')
+    reload(settings)
 
 
 def start_frontend(frontend_name, frontend_config):
@@ -197,10 +202,6 @@ def process_http_backed_job(job, backend_config):
                 job.backend_sock.close()
             except:
                 pass
-
-
-def orc_key(backend_name):
-    return 'outstanding_requests_count:%s' % backend_name
 
 
 def recv_http_payload(job, max_payload_len=0):
