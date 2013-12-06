@@ -14,18 +14,20 @@ import sys
 import httplib
 import time
 import json
-from . import queue
+import urlparse
+from . import job_queue
+from .http_exception import HttpException
+from .http_exception import TooManyRequestsHttpException
 
 LOGGER = logging.getLogger(__name__)
-HTTP_STATUS_TOO_MANY_REQUESTS = 429
 
 
 def main(*argv):
-    signal.signal(signal.SIGINT, lambda signum, fame: queue.shutdown())
+    signal.signal(signal.SIGINT, lambda signum, fame: job_queue.shutdown())
     signal.signal(signal.SIGHUP, lambda signum, fame: reload_settings())
     for frontend_name, frontend_config in settings.FRONTENDS.items():
         gevent.spawn(start_frontend, frontend_name, frontend_config)
-    queue.serve_forever(
+    job_queue.serve_forever(
         schedule_job=schedule_job,
         check_quota=check_quota,
         handle_ready_job=handle_ready_job)
@@ -51,9 +53,11 @@ def start_frontend(frontend_name, frontend_config):
 
 
 def handle_frontend_http(frontend_sock, frontend_sock_address):
-    job = queue.new_job()
+    job = job_queue.new_job()
     job.frontend_sock = frontend_sock
     job.peeked_data = ''
+    job.client_ip = frontend_sock_address[0]
+    job.client_port = frontend_sock_address[1]
     try:
         try:
             recv_until_http_header_ended(job)
@@ -74,10 +78,17 @@ def handle_frontend_http(frontend_sock, frontend_sock_address):
                 job.frontend_sock.close()
                 job.frontend_sock = None
                 if '/enqueue_at' == job.path:
-                    queue.enqueue_delayed(job, job.payload['at'])
+                    job_queue.enqueue_delayed(job, job.payload['at'])
                     return
             if schedule_job(job):
-                queue.enqueue_ready(job)
+                job_queue.enqueue_ready(job)
+        except EmptyHttpRequest:
+            return
+        except InvalidHttpRequest:
+            LOGGER.error('[%s] parse http request failed, pass directly' % job)
+            # we can not parse the request, pass to backend as it is
+            job_queue.enqueue_ready(job)
+            return
         except HttpException:
             raise
         except:
@@ -91,7 +102,7 @@ def handle_frontend_http(frontend_sock, frontend_sock_address):
 def schedule_job(job):
     should_process = _schedule_job(job)
     if should_process:
-        if queue.enqueue_quota_exceeded(job, (('backend', job.backend),)):
+        if job_queue.enqueue_quota_exceeded(job, (('backend', job.backend),)):
             return False
     return should_process
 
@@ -107,15 +118,15 @@ def _schedule_job(job):
         return True
     elif settings.ACTION_REJECT == action_name:
         LOGGER.info('[%s] reject' % job)
-        raise HttpException(HTTP_STATUS_TOO_MANY_REQUESTS, 'too many requests')
+        raise TooManyRequestsHttpException()
     elif settings.ACTION_DELAY == action_name:
         until = action_args['until']
         LOGGER.info('[%s] delay until %s' % (job, until))
-        queue.enqueue_delayed(job, until)
+        job_queue.enqueue_delayed(job, until)
     elif settings.ACTION_CHECK_QUOTA == action_name:
         job_group = action_args['job_group']
         job_group = tuple((k, job_group[k]) for k in sorted(job_group.keys()))
-        return not queue.enqueue_quota_exceeded(job, job_group)
+        return not job_queue.enqueue_quota_exceeded(job, job_group)
     else:
         LOGGER.error('[%s] unknown action' % job)
     return False
@@ -132,7 +143,7 @@ def check_outstanding_requests(backend_name):
     backend_config = settings.BACKENDS[backend_name]
     limit = backend_config['outstanding_requests_limit']
     if 'http' == backend_config['type']:
-        count = queue.get_outstanding_requests_count(backend_name)
+        count = job_queue.get_outstanding_requests_count(backend_name)
         if count > limit:
             return time.time() + 1
         else:
@@ -141,7 +152,7 @@ def check_outstanding_requests(backend_name):
         import rq
 
         rq_queue = rq.Queue(name=backend_config['queue'], connection=backend_config['connection'])
-        count = queue.get_outstanding_requests_count(backend_name) + rq_queue.count
+        count = job_queue.get_outstanding_requests_count(backend_name) + rq_queue.count
         if count > limit:
             return time.time() + 1
         else:
@@ -176,7 +187,7 @@ def spawn_job(job):
 
 def process_http_backed_job(job, backend_config):
     try:
-        queue.increase_processing_jobs_count(job.backend)
+        job_queue.increase_processing_jobs_count(job.backend)
         try:
             job.backend_sock = socket.socket()
             job.backend_sock.connect((backend_config['host'], backend_config['port']))
@@ -192,7 +203,7 @@ def process_http_backed_job(job, backend_config):
     except:
         LOGGER.exception('[%s] failed to process' % job)
     finally:
-        queue.decrease_processing_jobs_count(job.backend)
+        job_queue.decrease_processing_jobs_count(job.backend)
         try:
             job.frontend_sock.close()
         except:
@@ -210,7 +221,8 @@ def recv_http_payload(job, max_payload_len=0):
     if 'Content-Length' in job.headers:
         payload_len = int(job.headers.get('Content-Length', 0))
         if 0 < max_payload_len < payload_len:
-            raise Exception('payload too large')
+            LOGGER.info('[%s] payload is too large' % job)
+            return
         _, _, partial_payload = job.peeked_data.partition(b'\r\n\r\n')
         more_payload_len = payload_len - len(partial_payload)
         more_payload = ''
@@ -219,18 +231,31 @@ def recv_http_payload(job, max_payload_len=0):
             job.peeked_data += more_payload
         job.payload = partial_payload + more_payload
     else:
-        raise Exception('does not support reading payload from no content length request')
+        LOGGER.info('[%s] content length unknown' % job)
+        return
 
 
 def parse_http_payload(job, payload_type):
     if not job.payload:
         return
     if 'raw' == payload_type:
-        return
-    if 'json' == payload_type:
+        pass
+    elif 'json' == payload_type:
         job.payload = json.loads(job.payload)
-        return
-    raise NotImplementedError('unsupported payload type: %s' % payload_type)
+    elif 'form' == payload_type:
+        form = {}
+        more_than_one = set()
+        for k, v in urlparse.parse_qsl(job.payload):
+            if k in more_than_one:
+                form[k].extend(v)
+            elif k in form:
+                more_than_one.add(k)
+                form[k] = [form[k], v]
+            else:
+                form[k] = v
+        job.payload = form
+    else:
+        raise NotImplementedError('unsupported payload type: %s' % payload_type)
 
 
 def recv_sock_until_len(sock, until_len, buffer_size=8192):
@@ -248,9 +273,12 @@ def recv_until_http_header_ended(job):
     # peeked_data are the bytes already read from the underlying sock
     for i in range(16):
         if job.peeked_data.find(b'\r\n\r\n') != -1:
+            # job.peeked_data = job.peeked_data.replace('keep-alive', 'close')
             return
         more_data = job.frontend_sock.recv(8192)
         if not more_data:
+            if not job.peeked_data:
+                raise EmptyHttpRequest()
             raise InvalidHttpRequest('http header incomplete')
         job.peeked_data += more_data
     raise InvalidHttpRequest('http header is too large')
@@ -271,6 +299,9 @@ def parse_http_headers(job):
 
 
 class InvalidHttpRequest(Exception):
+    pass
+
+class EmptyHttpRequest(InvalidHttpRequest):
     pass
 
 
@@ -332,22 +363,3 @@ def forward(job, buffer_size=8192):
             d2u.kill()
         except:
             pass
-
-
-class HttpException(Exception):
-    def __init__(self, status, status_message=None, headers=None, body=None):
-        self.status = status
-        self.status_message = status_message
-        self.headers = headers
-        self.body = body
-
-    def send_error_response(self, sock):
-        try:
-            sock.sendall('HTTP/1.1 %d %s\r\n' % (self.status, self.status_message or ''))
-            for k, v in (self.headers or {}).items():
-                sock.sendall('%s: %s\r\n' % (k, v))
-            sock.sendall('\r\n')
-            if self.body:
-                sock.sendall(self.body)
-        except:
-            LOGGER.exception('failed to send error response')

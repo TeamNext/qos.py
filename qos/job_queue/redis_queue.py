@@ -5,6 +5,7 @@ import json
 import gevent.queue
 
 from .. import settings
+from ..http_exception import TooManyRequestsHttpException
 
 
 LOGGER = logging.getLogger(__name__)
@@ -143,8 +144,10 @@ def enqueue_quota_exceeded(job, job_group): # returns True if quota exceeded
 def do_enqueue_quota_exceeded(job, job_group):
     settings.REDIS_SERVER.sadd('job_groups', serialize_job_group(job_group))
     quota_exceeded_job_queue = get_quota_exceeded_job_queue(job_group)
-    job.on_quota_exceeded(job_group, len(quota_exceeded_job_queue))
-    quota_exceeded_job_queue.push(serialize_job(job), job.priority)
+    if job.on_quota_exceeded(job_group, len(quota_exceeded_job_queue)):
+        quota_exceeded_job_queue.push(serialize_job(job), job.priority)
+    else:
+        raise TooManyRequestsHttpException()
 
 
 def rtc_key(job_group):

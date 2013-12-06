@@ -3,6 +3,7 @@ import logging
 
 import gevent.queue
 from .. import settings
+from ..http_exception import TooManyRequestsHttpException
 
 LOGGER = logging.getLogger(__name__)
 
@@ -99,22 +100,26 @@ def enqueue_delayed(job, until):
 def enqueue_quota_exceeded(job, job_group): # returns True if quota exceeded
     recheck_time = recheck_time_cache.get(job_group)
     if recheck_time and recheck_time > time.time():
-        quota_exceeded_job_queue = quota_exceeded_job_queues.setdefault(job_group,
-                                                                        gevent.queue.PriorityQueue(DEFAULT_QUEUE_SIZE))
-        job.on_quota_exceeded(job_group, quota_exceeded_job_queue.qsize)
-        quota_exceeded_job_queue.put_nowait(PrioritizedItem(job))
-        LOGGER.debug('[%s] skip recheck, back off to quota exceeded queue %s' % (job, job_group))
-        return True
+        quota_exceeded_job_queue = quota_exceeded_job_queues.setdefault(
+            job_group, gevent.queue.PriorityQueue(DEFAULT_QUEUE_SIZE))
+        if job.on_quota_exceeded(job_group, quota_exceeded_job_queue.qsize):
+            quota_exceeded_job_queue.put_nowait(PrioritizedItem(job))
+            LOGGER.debug('[%s] skip recheck, back off to quota exceeded queue %s' % (job, job_group))
+            return True
+        else:
+            raise TooManyRequestsHttpException()
     recheck_time = check_quota(job_group)
     if recheck_time:
-        quota_exceeded_job_queue = quota_exceeded_job_queues.setdefault(job_group,
-                                                                        gevent.queue.PriorityQueue(DEFAULT_QUEUE_SIZE))
-        job.on_quota_exceeded(job_group, quota_exceeded_job_queue.qsize)
-        quota_exceeded_job_queue.put_nowait(PrioritizedItem(job))
-        recheck_time_cache[job_group] = recheck_time
-        recheck_request_queue.put_nowait(RecheckRequest(job_group, recheck_time))
-        LOGGER.info('[%s] checked and back off to quota exceeded queue %s' % (job, job_group))
-        return True
+        quota_exceeded_job_queue = quota_exceeded_job_queues.setdefault(
+            job_group, gevent.queue.PriorityQueue(DEFAULT_QUEUE_SIZE))
+        if job.on_quota_exceeded(job_group, quota_exceeded_job_queue.qsize):
+            quota_exceeded_job_queue.put_nowait(PrioritizedItem(job))
+            recheck_time_cache[job_group] = recheck_time
+            recheck_request_queue.put_nowait(RecheckRequest(job_group, recheck_time))
+            LOGGER.info('[%s] checked and back off to quota exceeded queue %s' % (job, job_group))
+            return True
+        else:
+            raise TooManyRequestsHttpException()
     else:
         return False # process now
 
