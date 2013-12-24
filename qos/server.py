@@ -296,6 +296,8 @@ def parse_http_headers(job):
         value = value.strip()
         job.headers[keyword] = value
     job.description = '%s => %s %s%s' % (job.job_id, job.method, job.headers.get('Host'), job.path)
+    lines.insert(1, 'X-Real-IP: %s' % job.client_ip)
+    job.peeked_data = '%s\r\n' % ('\r\n'.join(lines))
 
 
 class InvalidHttpRequest(Exception):
