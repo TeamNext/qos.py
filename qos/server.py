@@ -296,8 +296,6 @@ def parse_http_headers(job):
         value = value.strip()
         job.headers[keyword] = value
     job.description = '%s => %s %s%s' % (job.job_id, job.method, job.headers.get('Host'), job.path)
-    lines.insert(1, 'X-Real-IP: %s' % job.client_ip)
-    job.peeked_data = '%s\r\n' % ('\r\n'.join(lines))
 
 
 class InvalidHttpRequest(Exception):
@@ -308,7 +306,8 @@ class EmptyHttpRequest(InvalidHttpRequest):
 
 
 def forward(job, buffer_size=8192):
-    job.backend_sock.sendall(job.peeked_data)
+    data = job.peeked_data.replace('Connection: keep-alive', 'X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip)
+    job.backend_sock.sendall(data)
 
     def from_backend_to_frontend():
         try:
@@ -331,6 +330,7 @@ def forward(job, buffer_size=8192):
         try:
             while True:
                 data = job.frontend_sock.recv(buffer_size)
+                data.replace('Connection: keep-alive', 'X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip)
                 if data:
                     job.backend_sock.sendall(data)
                 else:
