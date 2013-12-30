@@ -330,7 +330,7 @@ def forward(job, buffer_size=8192):
         try:
             while True:
                 data = job.frontend_sock.recv(buffer_size)
-                data.replace('Connection: keep-alive', 'X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip)
+                data = data.replace('Connection: keep-alive', 'X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip)
                 if data:
                     job.backend_sock.sendall(data)
                 else:
