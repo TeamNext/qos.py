@@ -18,8 +18,10 @@ import urlparse
 from . import job_queue
 from .http_exception import HttpException
 from .http_exception import TooManyRequestsHttpException
+import re
 
 LOGGER = logging.getLogger(__name__)
+RE_CONNECTION_KEEP_ALIVE = re.compile(r'Connection: Keep-Alive', re.IGNORECASE)
 
 
 def main(*argv):
@@ -306,7 +308,7 @@ class EmptyHttpRequest(InvalidHttpRequest):
 
 
 def forward(job, buffer_size=8192):
-    data = job.peeked_data.replace('Connection: keep-alive', 'X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip)
+    data = RE_CONNECTION_KEEP_ALIVE.sub('X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip, job.peeked_data)
     job.backend_sock.sendall(data)
 
     def from_backend_to_frontend():
@@ -317,9 +319,8 @@ def forward(job, buffer_size=8192):
                     job.frontend_sock.sendall(data)
                 else:
                     return
-        except socket.error as e:
-            if e[0] not in (10053, 10054, 10057, errno.EPIPE):
-                return e
+        except socket.error:
+            return
         except gevent.GreenletExit:
             return
         except:
@@ -330,14 +331,13 @@ def forward(job, buffer_size=8192):
         try:
             while True:
                 data = job.frontend_sock.recv(buffer_size)
-                data = data.replace('Connection: keep-alive', 'X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip)
+                data = RE_CONNECTION_KEEP_ALIVE.sub('X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip, data)
                 if data:
                     job.backend_sock.sendall(data)
                 else:
                     return
-        except socket.error as e:
-            if e[0] not in (10053, 10054, 10057, errno.EPIPE):
-                return e
+        except socket.error:
+            return
         except gevent.GreenletExit:
             return
         except:
