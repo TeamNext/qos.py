@@ -22,6 +22,7 @@ import re
 
 LOGGER = logging.getLogger(__name__)
 RE_CONNECTION_KEEP_ALIVE = re.compile(r'Connection: Keep-Alive', re.IGNORECASE)
+RE_HOST = re.compile(r'Host: ', re.IGNORECASE)
 
 
 def main(*argv):
@@ -308,7 +309,7 @@ class EmptyHttpRequest(InvalidHttpRequest):
 
 
 def forward(job, buffer_size=8192):
-    data = RE_CONNECTION_KEEP_ALIVE.sub('X-Real-IP: %s\r\nConnection: keep-alive' % job.client_ip, job.peeked_data)
+    data = RE_HOST.sub('X-Real-IP: %s\r\nHost: ' % job.client_ip, job.peeked_data)
     job.backend_sock.sendall(data)
 
     def from_backend_to_frontend():

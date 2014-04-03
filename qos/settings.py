@@ -23,6 +23,7 @@ for member_name in dir(module):
         locals()[member_name] = getattr(module, member_name)
 
 qos_logger = logging.getLogger('qos')
+qos_logger.handlers = []
 if 0 == len(qos_logger.handlers):
     qos_logger.propagate = False
     if 'LOGGER_CONFIG' in locals():
